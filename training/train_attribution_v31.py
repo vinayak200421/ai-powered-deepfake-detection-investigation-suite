@@ -708,6 +708,32 @@ def run_eval_only(
     return results
 
 
+@torch.no_grad()
+def update_bn_dsan(loader: DataLoader, model: nn.Module, device: torch.device) -> None:
+    """Refresh BatchNorm statistics for DSAN models that take ``(rgb, srm)`` inputs."""
+    momenta: dict[nn.Module, float | None] = {}
+    for module in model.modules():
+        if isinstance(module, torch.nn.modules.batchnorm._BatchNorm):
+            momenta[module] = module.momentum
+            module.reset_running_stats()
+            module.momentum = None
+
+    if not momenta:
+        return
+
+    was_training = model.training
+    model.train()
+    try:
+        for batch in loader:
+            rgb = batch[0].to(device, non_blocking=True)
+            srm = batch[1].to(device, non_blocking=True)
+            model(rgb, srm)
+    finally:
+        for module, momentum in momenta.items():
+            module.momentum = momentum
+        model.train(was_training)
+
+
 def run_training(
     cfg: dict[str, Any],
     project_root: Path,
@@ -810,7 +836,7 @@ def run_training(
             break
 
     if swa_on and swa_model is not None:
-        torch.optim.swa_utils.update_bn(tr_loader, swa_model, device=device)
+        update_bn_dsan(tr_loader, swa_model, device)
         torch.save({"model": swa_model.module.state_dict()}, output_dir / "swa.pt")
     if ema is not None:
         ema.apply_shadow(model)

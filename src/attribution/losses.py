@@ -22,7 +22,7 @@ class SupConLoss(nn.Module):
         self.temperature = temperature
 
     def forward(self, features: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
-        features = F.normalize(features, dim=1)
+        features = F.normalize(features.float(), dim=1)
         b = features.shape[0]
         if b == 0:
             return features.sum() * 0.0
@@ -39,7 +39,8 @@ class SupConLoss(nn.Module):
         log_prob = logits - torch.logsumexp(logits, dim=1, keepdim=True)
 
         num_positives = mask_pos.sum(dim=1)
-        mean_log_prob = (mask_pos * log_prob).sum(dim=1) / (num_positives + 1e-8)
+        pos_log_prob = torch.where(mask_pos.bool(), log_prob, torch.zeros_like(log_prob))
+        mean_log_prob = pos_log_prob.sum(dim=1) / (num_positives + 1e-8)
 
         valid_mask = num_positives > 0
         if valid_mask.sum() == 0:
