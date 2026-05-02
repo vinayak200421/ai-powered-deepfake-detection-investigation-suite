@@ -1,4 +1,8 @@
-"""Dual Grad-CAM++ for DSAN RGB + frequency streams (plan §11)."""
+"""Dual Grad-CAM++ for DSAN v3.1 RGB + frequency streams (plan §11).
+
+V8-04: set_srm before each CAM call.
+Updated to support DSANv31 (EfficientNetV2-M + ResNet-50).
+"""
 
 from __future__ import annotations
 
@@ -6,44 +10,71 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from src.attribution.attribution_model import DSANv3
 from src.attribution.gradcam_wrapper import DSANGradCAMWrapper
 
 
 class ExplainabilityModule:
-    """Builds spatial + frequency Grad-CAM++ targets from a trained ``DSANv3``."""
+    """Builds spatial + frequency Grad-CAM++ targets from a trained DSANv31."""
 
-    def __init__(self, dsan_model: DSANv3, device: str = "cpu") -> None:
+    def __init__(self, dsan_model: nn.Module, device: str = "cpu") -> None:
         self.device = device
         dsan_model.eval()
-        self.wrapper = DSANGradCAMWrapper(dsan_model).to(device)
+        self.wrapper = DSANGradCAMWrapper(dsan_model)
+        self.wrapper.to(device)
         self.dsan = dsan_model
 
         from pytorch_grad_cam import GradCAMPlusPlus
 
-        rgb_target = self._find_target_layer(self.wrapper.dsan.rgb_stream.backbone)
+        rgb_target = self._find_rgb_target_layer(dsan_model)
         self.rgb_cam = GradCAMPlusPlus(model=self.wrapper, target_layers=[rgb_target])
 
-        freq_target = self._freq_target_layer(self.dsan)
+        freq_target = self._find_freq_target_layer(dsan_model)
         self.freq_cam = GradCAMPlusPlus(model=self.wrapper, target_layers=[freq_target])
 
     @staticmethod
-    def _find_target_layer(efficientnet_backbone: nn.Module) -> nn.Module:
+    def _find_rgb_target_layer(dsan: nn.Module) -> nn.Module:
+        """Find the last spatial (non-1x1) Conv2d in the RGB stream backbone."""
         target: nn.Module | None = None
-        for _name, module in efficientnet_backbone.named_modules():
-            if isinstance(module, nn.Conv2d) and module.kernel_size != (1, 1):
+        # Access rgb_stream.backbone for both DSANv3 and DSANv31
+        backbone = dsan.rgb_stream.backbone
+        for _name, module in backbone.named_modules():
+            if isinstance(module, nn.Conv2d) and module.kernel_size not in ((1, 1), (1,)):
                 target = module
         if target is None:
-            raise RuntimeError("No spatial Conv2d found in EfficientNet backbone")
+            # Fallback: last Conv2d of any size
+            for _name, module in backbone.named_modules():
+                if isinstance(module, nn.Conv2d):
+                    target = module
+        if target is None:
+            raise RuntimeError("No Conv2d found in RGB backbone for Grad-CAM target")
         return target
 
     @staticmethod
-    def _freq_target_layer(dsan: DSANv3) -> nn.Module:
-        # ``FrequencyStream.backbone`` is ResNet ``children()[:-1]``: ends with layer4 then avgpool.
+    def _find_freq_target_layer(dsan: nn.Module) -> nn.Module:
+        """Find conv2 of the last block in layer4 of ResNet frequency stream."""
         bb = dsan.freq_stream.backbone
-        layer4 = bb[-2]
-        last_block = layer4[-1]
-        return last_block.conv2
+        # backbone is a Sequential; layer4 is the second-to-last child (before avgpool)
+        children = list(bb.children())
+        # Find layer4 — it is an nn.Sequential of Bottleneck/BasicBlock
+        layer4: nn.Module | None = None
+        for ch in reversed(children):
+            if isinstance(ch, nn.Sequential):
+                layer4 = ch
+                break
+        if layer4 is None:
+            raise RuntimeError("Could not find layer4 in freq stream backbone")
+        last_block = list(layer4.children())[-1]
+        # Try conv2 attribute (ResNet Bottleneck / BasicBlock)
+        if hasattr(last_block, "conv2"):
+            return last_block.conv2
+        # Fallback: last Conv2d in that block
+        target: nn.Module | None = None
+        for _n, m in last_block.named_modules():
+            if isinstance(m, nn.Conv2d):
+                target = m
+        if target is None:
+            raise RuntimeError("Could not find conv2 in last freq stream block")
+        return target
 
     def generate_heatmaps(
         self,
@@ -59,15 +90,14 @@ class ExplainabilityModule:
         srm_tensor = srm_tensor.to(self.device)
         targets = [ClassifierOutputTarget(target_class)]
 
+        # V8-04: set_srm before each CAM call
         self.wrapper.set_srm(srm_tensor)
         rgb_cam_output = self.rgb_cam(input_tensor=rgb_tensor, targets=targets)
-        rgb_heatmap = np.asarray(rgb_cam_output[0], dtype=np.float32)
-        rgb_heatmap = self._norm01(rgb_heatmap)
+        rgb_heatmap = self._norm01(np.asarray(rgb_cam_output[0], dtype=np.float32))
 
         self.wrapper.set_srm(srm_tensor)
         freq_cam_output = self.freq_cam(input_tensor=rgb_tensor, targets=targets)
-        freq_heatmap = np.asarray(freq_cam_output[0], dtype=np.float32)
-        freq_heatmap = self._norm01(freq_heatmap)
+        freq_heatmap = self._norm01(np.asarray(freq_cam_output[0], dtype=np.float32))
 
         return rgb_heatmap, freq_heatmap
 

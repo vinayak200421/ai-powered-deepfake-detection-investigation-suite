@@ -47,8 +47,8 @@ class PipelineConfig:
     inference_config_path: Path = Path("configs/inference_config.yaml")
     xception_weights: Path | None = None
     models_dir: Path = Path("models")
-    fusion_model: Path = Path("models/fusion_lr.pkl")
-    attribution_model: Path | None = Path("models/dsan_v31_demo_200/best_demo.pt")
+    fusion_model: Path = Path("models/fusion_lr_hand_calibrated.pkl")
+    attribution_model: Path | None = Path("models/newly trained models/best_demo_550vid.pt")
 
 
 
@@ -103,14 +103,20 @@ class Pipeline:
             self._attribution.to("cpu")
             self._attribution.eval()
 
-    def _run_attribution(self, crops_bgr: list[np.ndarray]) -> dict[str, Any]:
-        import torch
+    def _run_attribution(
+        self,
+        crops_bgr: list[np.ndarray],
+        enable_gradcam: bool = True,
+        heatmap_dir: str | Path | None = None,
+    ) -> dict[str, Any]:
         import cv2
+        import torch
         from torchvision import transforms
+
         from src.attribution.dataset_v31 import DSANv31Dataset
 
         if not self._attribution or not crops_bgr:
-            return {"attribution_method": "Unknown", "attribution_scores": {}}
+            return {"attribution_method": "Unknown", "attribution_scores": {}, "heatmap_paths": {}}
 
         rgb_transform = transforms.Compose([
             transforms.ToPILImage(),
@@ -120,36 +126,85 @@ class Pipeline:
         ])
 
         _mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
-        _std = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
+        _std  = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
 
         methods = ["Deepfakes", "Face2Face", "FaceSwap", "NeuralTextures"]
-        all_logits = []
+        all_logits: list[torch.Tensor] = []
+        rgb_tensors: list[torch.Tensor] = []
+        srm_tensors: list[torch.Tensor] = []
 
         with torch.no_grad():
             for bgr in crops_bgr:
                 rgb_cv = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
                 rgb = rgb_transform(rgb_cv)
                 srm = DSANv31Dataset._srm_from_rgb(rgb, _mean, _std)
-
-                rgb = rgb.unsqueeze(0).to(self.device)
-                srm = srm.unsqueeze(0).to(self.device)
-
-                logits = self._attribution.predict(rgb, srm)
+                rgb_tensors.append(rgb)
+                srm_tensors.append(srm)
+                logits = self._attribution.predict(
+                    rgb.unsqueeze(0).to(self.device),
+                    srm.unsqueeze(0).to(self.device),
+                )
                 all_logits.append(logits.cpu())
 
         if not all_logits:
-            return {"attribution_method": "Unknown", "attribution_scores": {}}
+            return {"attribution_method": "Unknown", "attribution_scores": {}, "heatmap_paths": {}}
 
-        avg_logits = torch.cat(all_logits, dim=0).mean(dim=0)
+        stacked = torch.cat(all_logits, dim=0)          # (N, 4)
+        avg_logits = stacked.mean(dim=0)
         probs = torch.softmax(avg_logits, dim=0).numpy()
         pred_idx = int(torch.argmax(avg_logits).item())
-
         scores = {methods[i]: float(probs[i]) for i in range(4)}
+
+        heatmap_paths: dict[str, str] = {}
+
+        if enable_gradcam and len(rgb_tensors) > 0:
+            try:
+                from src.modules.explainability import ExplainabilityModule
+
+                # Pick the frame with highest confidence (max logit for predicted class)
+                best_frame_idx = int(torch.argmax(stacked[:, pred_idx]).item())
+                best_rgb_t = rgb_tensors[best_frame_idx].unsqueeze(0)  # (1,3,H,W)
+                best_srm_t = srm_tensors[best_frame_idx].unsqueeze(0)
+                best_bgr   = crops_bgr[best_frame_idx]
+
+                explainer = ExplainabilityModule(self._attribution, device=self.device)
+                rgb_hm, freq_hm = explainer.generate_heatmaps(best_rgb_t, best_srm_t, pred_idx)
+
+                # Convert best crop to RGB for overlay
+                best_rgb_np = cv2.cvtColor(
+                    cv2.resize(best_bgr, (380, 380)), cv2.COLOR_BGR2RGB
+                )
+                rgb_overlay  = explainer.overlay_heatmap(best_rgb_np, rgb_hm)
+                freq_overlay = explainer.overlay_heatmap(best_rgb_np, freq_hm)
+
+                # Save to heatmap_dir
+                import tempfile
+                out_dir = Path(heatmap_dir) if heatmap_dir else Path(
+                    tempfile.mkdtemp(prefix="df_heatmaps_")
+                )
+                out_dir.mkdir(parents=True, exist_ok=True)
+
+                rgb_path  = out_dir / "rgb_heatmap.png"
+                freq_path = out_dir / "freq_heatmap.png"
+                cv2.imwrite(str(rgb_path),  cv2.cvtColor(rgb_overlay,  cv2.COLOR_RGB2BGR))
+                cv2.imwrite(str(freq_path), cv2.cvtColor(freq_overlay, cv2.COLOR_RGB2BGR))
+
+                heatmap_paths = {
+                    "rgb_heatmap":  str(rgb_path),
+                    "freq_heatmap": str(freq_path),
+                }
+            except Exception as _e:
+                # Grad-CAM is best-effort — never crash the pipeline
+                import traceback
+                traceback.print_exc()
+                heatmap_paths = {}
 
         return {
             "attribution_method": methods[pred_idx],
-            "attribution_scores": scores
+            "class_probabilities": scores,
+            "heatmap_paths": heatmap_paths,
         }
+
 
     def run_on_crops_dir(self, crops_dir: str | Path) -> dict[str, Any]:
         """Analyze an already-extracted crops directory containing frame_*.png."""
