@@ -21,6 +21,13 @@ class SpatialDetector:
         self.device = torch.device(dev)
         self.model = load_xception(path, device=str(self.device))
         self.model.to(self.device)
+        self.model.eval()
+
+    def to(self, device: str | torch.device) -> None:
+        """Move the underlying model to the target device."""
+        self.device = torch.device(device)
+        self.model.to(self.device)
+
         self.transform = transforms.Compose(
             [
                 transforms.ToPILImage(),

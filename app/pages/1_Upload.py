@@ -26,10 +26,11 @@ inference_mode = st.radio(
         "HTTP API (tunnel to GPU server)",
         "Local CPU pipeline (very slow; needs weights)",
     ),
-    index=0,
+    index=1,
 )
 
 api_url = st.text_input("Analyze URL", value=DEFAULT_ANALYZE_URL)
+enable_gradcam = st.checkbox("Generate Grad-CAM Heatmaps (Slower)", value=True)
 timeout_s = st.slider("Request timeout (s)", min_value=10, max_value=300, value=120)
 max_retries = st.slider("HTTP retries", min_value=1, max_value=6, value=3)
 
@@ -77,9 +78,13 @@ if run_upload:
         else:
             with st.spinner("Calling remote API..."):
                 try:
+                    url_to_call = api_url
+                    if enable_gradcam:
+                        url_to_call += "&gradcam=true" if "?" in url_to_call else "?gradcam=true"
+                        
                     result = analyze_video_bytes(
                         raw,
-                        url=api_url,
+                        url=url_to_call,
                         timeout_s=timeout_s,
                         max_retries=max_retries,
                     )

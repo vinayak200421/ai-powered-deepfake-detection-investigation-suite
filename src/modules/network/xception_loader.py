@@ -29,12 +29,41 @@ def load_xception(weights_path: str, device: str = "cpu") -> Xception:
 
     patch_relu_inplace(model)
 
+    import sys
+    import types
+    from src.modules import network
+    import src.modules.network.models as models
+    from src.modules.network import xception as local_xception
+    
+    sys.modules["network"] = network
+    sys.modules["network.models"] = models
+    
+    pm = types.ModuleType("pretrainedmodels")
+    pmm = types.ModuleType("pretrainedmodels.models")
+    
+    sys.modules["pretrainedmodels"] = pm
+    sys.modules["pretrainedmodels.models"] = pmm
+    sys.modules["pretrainedmodels.models.xception"] = local_xception
+
     # Legacy .p pickle; weights_only=False required on PyTorch 2.6+ (safe pickle from official URL).
     state = torch.load(
         weights_path,
         map_location=device,
         weights_only=False,
     )
-    model.load_state_dict(state, strict=True)
+
+    if hasattr(state, "state_dict"):
+        state = state.state_dict()
+    
+    # The original TransferModel puts Xception inside self.model.
+    # We strip 'model.' prefix if present.
+    new_state = {}
+    for k, v in state.items():
+        if k.startswith("model."):
+            new_state[k[6:]] = v
+        else:
+            new_state[k] = v
+
+    model.load_state_dict(new_state, strict=True)
     model.eval()
     return model

@@ -15,8 +15,9 @@ st.set_page_config(page_title="DeepFake Detection", layout="wide", initial_sideb
 
 with st.sidebar:
     st.caption(
-        "Offline: use **Bundled sample JSON** on Upload. GPU: tunnel port 5001, then HTTP API mode."
+        "Local API: connected to http://127.0.0.1:5001/analyze."
     )
+
 
 st.title("DeepFake Detection")
 st.markdown(
@@ -24,6 +25,5 @@ st.markdown(
     "**Report** → **About**."
 )
 st.info(
-    "Live GPU inference: SSH tunnel `ssh -L 5001:localhost:5001 user@gpu-host`, "
-    "then call `POST http://127.0.0.1:5001/analyze` (plan §13)."
+    "Local GPU Inference is running! The Streamlit frontend is communicating directly with your RTX 3050 backend."
 )

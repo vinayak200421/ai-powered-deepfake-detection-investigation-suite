@@ -49,17 +49,25 @@ def create_app(*, mock: bool = False) -> Flask:
         out: dict[str, Any] | None = None
         err: tuple[Any, int] | None = None
         try:
-            pipe = Pipeline()
+            import torch
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            pipe = Pipeline(device=device)
             pipe.load_models()
             out = pipe.run_on_video(tmp_path)
+
         except FileNotFoundError as e:
             err = (jsonify({"error": str(e)}), 503)
         except Exception as e:  # pragma: no cover
+            import traceback
+            traceback.print_exc()
             err = (jsonify({"error": str(e)}), 500)
         finally:
             import shutil
+            import torch
 
             shutil.rmtree(tmp_dir, ignore_errors=True)
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
         if err is not None:
             return err
