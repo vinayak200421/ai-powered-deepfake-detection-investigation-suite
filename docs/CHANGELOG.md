@@ -7,6 +7,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com) loosely; versions 
 
 ## [Unreleased] — V1-fix in progress
 
+### Changed - inference model paths
+
+- ``PipelineConfig`` defaults now target ``models/fusion_lr_final.pkl`` and ``models/dsan_v31_demo_200/best_final_90pct.pt``. Override without renames via env: ``DEEPFAKE_FUSION_MODEL``, ``DEEPFAKE_ATTRIBUTION_CKPT`` (empty disables attribution checkpoint load).
+
+### Changed - Streamlit video inference performance
+
+- Cached the V1 Flask `Pipeline` per device so repeated Streamlit analyses do not reload model weights every request.
+- Made Grad-CAM generation opt-in end-to-end, added per-stage inference timings and backend resource snapshots, reduced repeated MTCNN calls with a configurable face-detection interval, and batched Xception frame scoring to reduce per-video overhead.
+- Added a `/resources` endpoint plus a Streamlit resource-check button for quick CPU/RAM/CUDA diagnostics during demos.
+
 ### Added - local GPU smoke test for Kaggle fallback prep
 
 - Added `scripts/smoke_test_local.py`, a CUDA-only DSAN v3.1 smoke test that reuses the training config override parser, builds the EfficientNet-B4 + ResNet-18 demo model, runs one AMP forward/backward pass on synthetic tensors, reports CUDA memory, and optionally validates two real FF++ crop DataLoader batches before Kaggle fallback training.
